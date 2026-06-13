@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
+import { getOrCreateUser } from '@/lib/getOrCreateUser'
 import { processAgentMessage } from '@/lib/ai'
 import { corsairSendEmail, corsairCreateEvent } from '@/lib/corsair'
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(req: NextRequest) {
   const session = await auth()
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!session?.user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const accessToken = (session as any).accessToken
   const { message } = await req.json()
@@ -15,9 +18,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No message provided' }, { status: 400 })
   }
 
-  // Load conversation history
+  const user = await getOrCreateUser(session)
+  if (!user) return NextResponse.json({ error: 'User not found' }, { status: 401 })
+
   const history = await prisma.chatMessage.findMany({
-    where: { userId: session.user.id },
+    where: { userId: user.id },
     orderBy: { createdAt: 'desc' },
     take: 10,
   })
@@ -25,17 +30,14 @@ export async function POST(req: NextRequest) {
     .reverse()
     .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
 
-  // Save user message
   await prisma.chatMessage.create({
-    data: { userId: session.user.id, role: 'user', content: message },
+    data: { userId: user.id, role: 'user', content: message },
   })
 
-  // Process with AI
   const { text, actions } = await processAgentMessage(message, formattedHistory, {
     userEmail: session.user.email || '',
   })
 
-  // Execute actions
   const results: string[] = []
   if (accessToken && actions) {
     for (const action of actions) {
@@ -66,23 +68,22 @@ export async function POST(req: NextRequest) {
 
   const finalText = results.length > 0 ? `${text}\n\n${results.join('\n')}` : text
 
-  // Save assistant response
   await prisma.chatMessage.create({
-    data: { userId: session.user.id, role: 'assistant', content: finalText },
+    data: { userId: user.id, role: 'assistant', content: finalText },
   })
 
-  return NextResponse.json({
-    text: finalText,
-    actions,
-  })
+  return NextResponse.json({ text: finalText, actions })
 }
 
 export async function GET(req: NextRequest) {
   const session = await auth()
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!session?.user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const user = await getOrCreateUser(session)
+  if (!user) return NextResponse.json({ messages: [] })
 
   const messages = await prisma.chatMessage.findMany({
-    where: { userId: session.user.id },
+    where: { userId: user.id },
     orderBy: { createdAt: 'asc' },
     take: 50,
   })

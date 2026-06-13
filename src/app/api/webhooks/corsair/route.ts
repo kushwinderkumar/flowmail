@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { classifyEmailPriority } from '@/lib/ai'
 
+export const dynamic = 'force-dynamic'
+
 /**
  * Corsair webhook endpoint
  * Receives real-time Gmail and Calendar push notifications via Corsair

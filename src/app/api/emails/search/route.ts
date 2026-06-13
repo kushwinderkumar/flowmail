@@ -1,24 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
+import { getOrCreateUser } from '@/lib/getOrCreateUser'
 import { corsairSearchEmails, corsairGetEmail } from '@/lib/corsair'
 import { classifyEmailPriority } from '@/lib/ai'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(req: NextRequest) {
   const session = await auth()
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!session?.user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { searchParams } = new URL(req.url)
   const query = searchParams.get('q') || ''
   if (!query) return NextResponse.json({ emails: [] })
 
+  const user = await getOrCreateUser(session)
+  if (!user) return NextResponse.json({ emails: [] })
+
   const accessToken = (session as any).accessToken
 
   try {
-    // First search local DB (fast)
+    // Fast local search first
     const localResults = await prisma.email.findMany({
       where: {
-        userId: session.user.id,
+        userId: user.id,
         OR: [
           { subject: { contains: query, mode: 'insensitive' } },
           { from: { contains: query, mode: 'insensitive' } },
@@ -62,7 +68,7 @@ export async function GET(req: NextRequest) {
             create: {
               gmailId: id,
               threadId: msg.threadId,
-              userId: session.user!.id!,
+              userId: user.id,
               from,
               to,
               subject,

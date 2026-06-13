@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
+import { getOrCreateUser } from '@/lib/getOrCreateUser'
 import { corsairListEmails, corsairGetEmail } from '@/lib/corsair'
 import { classifyEmailPriority } from '@/lib/ai'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(req: NextRequest) {
   const session = await auth()
-  if (!session?.user?.id) {
+  if (!session?.user?.email) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
@@ -22,7 +25,9 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'No access token' }, { status: 401 })
     }
 
-    // Map folder to Gmail label
+    const user = await getOrCreateUser(session)
+    if (!user) return NextResponse.json({ error: 'User not found' }, { status: 401 })
+
     const labelMap: Record<string, string[]> = {
       inbox: ['INBOX'],
       sent: ['SENT'],
@@ -40,14 +45,11 @@ export async function GET(req: NextRequest) {
 
     const messageIds: string[] = corsairResult.messages?.map((m: any) => m.id) || []
 
-    // Fetch full email details & sync to DB
     const emails = await Promise.all(
       messageIds.map(async (id) => {
-        // Check cache first
         const cached = await prisma.email.findUnique({ where: { gmailId: id } })
         if (cached) return cached
 
-        // Fetch from Corsair/Gmail
         const msg = await corsairGetEmail(accessToken, id)
         const headers = msg.payload?.headers || []
         const getHeader = (name: string) =>
@@ -59,7 +61,6 @@ export async function GET(req: NextRequest) {
         const dateStr = getHeader('date')
         const receivedAt = dateStr ? new Date(dateStr) : new Date()
 
-        // Extract body
         let body = ''
         let bodyHtml = ''
         const extractBody = (part: any): void => {
@@ -72,20 +73,15 @@ export async function GET(req: NextRequest) {
         }
         extractBody(msg.payload || {})
 
-        // AI priority classification
-        const priority = await classifyEmailPriority(
-          subject,
-          msg.snippet || '',
-          from
-        )
+        const priority = await classifyEmailPriority(subject, msg.snippet || '', from)
 
-        const email = await prisma.email.upsert({
+        return prisma.email.upsert({
           where: { gmailId: id },
           update: {},
           create: {
             gmailId: id,
             threadId: msg.threadId,
-            userId: session.user!.id!,
+            userId: user.id,
             from,
             to,
             subject,
@@ -98,7 +94,6 @@ export async function GET(req: NextRequest) {
             priority,
           },
         })
-        return email
       })
     )
 

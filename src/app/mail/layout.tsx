@@ -5,6 +5,8 @@ import KeyboardShortcutsProvider from '@/components/providers/KeyboardShortcutsP
 import CommandPalette from '@/components/mail/CommandPalette'
 import AgentChatPanel from '@/components/mail/AgentChatPanel'
 
+export const dynamic = 'force-dynamic'
+
 export default async function MailLayout({ children }: { children: React.ReactNode }) {
   const session = await auth()
   if (!session) redirect('/auth/signin')

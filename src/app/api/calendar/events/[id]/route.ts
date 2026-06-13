@@ -1,19 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
+import { getOrCreateUser } from '@/lib/getOrCreateUser'
 import { corsairUpdateEvent, corsairDeleteEvent } from '@/lib/corsair'
+
+export const dynamic = 'force-dynamic'
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const session = await auth()
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!session?.user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { id } = await params
   const body = await req.json()
   const accessToken = (session as any).accessToken
 
-  const event = await prisma.calendarEvent.findFirst({
-    where: { id, userId: session.user.id },
-  })
+  const user = await getOrCreateUser(session)
+  if (!user) return NextResponse.json({ error: 'User not found' }, { status: 401 })
+
+  const event = await prisma.calendarEvent.findFirst({ where: { id, userId: user.id } })
   if (!event) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   if (accessToken) {
@@ -36,14 +40,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const session = await auth()
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!session?.user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { id } = await params
   const accessToken = (session as any).accessToken
 
-  const event = await prisma.calendarEvent.findFirst({
-    where: { id, userId: session.user.id },
-  })
+  const user = await getOrCreateUser(session)
+  if (!user) return NextResponse.json({ error: 'User not found' }, { status: 401 })
+
+  const event = await prisma.calendarEvent.findFirst({ where: { id, userId: user.id } })
   if (!event) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   if (accessToken) {

@@ -1,10 +1,7 @@
 import NextAuth from 'next-auth'
 import GoogleProvider from 'next-auth/providers/google'
-import { PrismaAdapter } from '@auth/prisma-adapter'
-import { prisma } from './db'
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  adapter: PrismaAdapter(prisma),
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
@@ -27,18 +24,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       },
     }),
   ],
+  session: {
+    strategy: 'jwt',
+    maxAge: 30 * 24 * 60 * 60, // 30 days
+  },
   callbacks: {
-    async session({ session, user }) {
+    async jwt({ token, account, profile }) {
+      // Persist the OAuth access_token and refresh_token to the token right after sign in
+      if (account) {
+        token.accessToken = account.access_token
+        token.refreshToken = account.refresh_token
+        token.expiresAt = account.expires_at
+        token.userId = token.sub
+      }
+      return token
+    },
+    async session({ session, token }) {
       if (session.user) {
-        session.user.id = user.id
-        // Get access token from DB
-        const account = await prisma.account.findFirst({
-          where: { userId: user.id, provider: 'google' },
-        })
-        if (account) {
-          ;(session as any).accessToken = account.access_token
-          ;(session as any).refreshToken = account.refresh_token
-        }
+        // Expose userId and access token to the session
+        ;(session.user as any).id = token.sub || (token.userId as string)
+        ;(session as any).accessToken = token.accessToken
+        ;(session as any).refreshToken = token.refreshToken
       }
       return session
     },
