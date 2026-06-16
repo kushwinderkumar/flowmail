@@ -7,103 +7,119 @@ import { classifyEmailPriority } from '@/lib/ai'
 
 export const dynamic = 'force-dynamic'
 
+const LABEL_MAP: Record<string, string[]> = {
+  inbox: ['INBOX'],
+  sent: ['SENT'],
+  starred: ['STARRED'],
+  trash: ['TRASH'],
+  spam: ['SPAM'],
+}
+
+function extractHeader(headers: Array<{ name: string; value: string }>, name: string): string {
+  return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? ''
+}
+
+function extractBody(part: any): { text: string; html: string } {
+  let text = ''
+  let html = ''
+  const decode = (data: string) => Buffer.from(data, 'base64').toString('utf-8')
+  if (part.mimeType === 'text/plain' && part.body?.data) text = decode(part.body.data)
+  else if (part.mimeType === 'text/html' && part.body?.data) html = decode(part.body.data)
+  if (part.parts) {
+    for (const child of part.parts) {
+      const sub = extractBody(child)
+      if (!text && sub.text) text = sub.text
+      if (!html && sub.html) html = sub.html
+    }
+  }
+  return { text, html }
+}
+
 export async function GET(req: NextRequest) {
   const session = await auth()
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  const accessToken = (session as any).accessToken as string | undefined
+  if (!accessToken) {
+    return NextResponse.json({ error: 'No access token' }, { status: 401 })
+  }
+
   const { searchParams } = new URL(req.url)
-  const folder = searchParams.get('folder') || 'inbox'
-  const pageToken = searchParams.get('pageToken') || undefined
-  const query = searchParams.get('q') || undefined
-  const limit = parseInt(searchParams.get('limit') || '20')
+  const folder = searchParams.get('folder') ?? 'inbox'
+  const pageToken = searchParams.get('pageToken') ?? undefined
+  const q = searchParams.get('q') ?? undefined
+  const limit = Math.min(parseInt(searchParams.get('limit') ?? '20', 10), 50)
 
   try {
-    const accessToken = (session as any).accessToken
-    if (!accessToken) {
-      return NextResponse.json({ error: 'No access token' }, { status: 401 })
-    }
-
     const user = await getOrCreateUser(session)
     if (!user) return NextResponse.json({ error: 'User not found' }, { status: 401 })
 
-    const labelMap: Record<string, string[]> = {
-      inbox: ['INBOX'],
-      sent: ['SENT'],
-      starred: ['STARRED'],
-      trash: ['TRASH'],
-      spam: ['SPAM'],
-    }
-
-    const corsairResult = await corsairListEmails(accessToken, {
+    const corsairResult = (await corsairListEmails(accessToken, {
       maxResults: limit,
       pageToken,
-      q: query,
-      labelIds: labelMap[folder] || ['INBOX'],
+      q,
+      labelIds: LABEL_MAP[folder] ?? ['INBOX'],
+    })) as any
+
+    const messageIds: string[] = corsairResult.messages?.map((m: any) => m.id) ?? []
+
+    // Batch-fetch cached emails to avoid N+1 queries
+    const cachedEmails = await prisma.email.findMany({
+      where: { gmailId: { in: messageIds } },
     })
+    const cachedMap = new Map(cachedEmails.map((e) => [e.gmailId, e]))
 
-    const messageIds: string[] = corsairResult.messages?.map((m: any) => m.id) || []
+    const uncachedIds = messageIds.filter((id) => !cachedMap.has(id))
 
-    const emails = await Promise.all(
-      messageIds.map(async (id) => {
-        const cached = await prisma.email.findUnique({ where: { gmailId: id } })
-        if (cached) return cached
-
-        const msg = await corsairGetEmail(accessToken, id)
-        const headers = msg.payload?.headers || []
-        const getHeader = (name: string) =>
-          headers.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value || ''
-
-        const subject = getHeader('subject') || '(no subject)'
-        const from = getHeader('from') || ''
-        const to = getHeader('to') || ''
-        const dateStr = getHeader('date')
+    // Fetch & classify missing emails (parallelised)
+    const fetchedEmails = await Promise.all(
+      uncachedIds.map(async (id) => {
+        const msg = (await corsairGetEmail(accessToken, id)) as any
+        const headers: Array<{ name: string; value: string }> = msg.payload?.headers ?? []
+        const subject = extractHeader(headers, 'subject') || '(no subject)'
+        const from = extractHeader(headers, 'from')
+        const to = extractHeader(headers, 'to')
+        const dateStr = extractHeader(headers, 'date')
         const receivedAt = dateStr ? new Date(dateStr) : new Date()
-
-        let body = ''
-        let bodyHtml = ''
-        const extractBody = (part: any): void => {
-          if (part.mimeType === 'text/plain' && part.body?.data) {
-            body = Buffer.from(part.body.data, 'base64').toString('utf-8')
-          } else if (part.mimeType === 'text/html' && part.body?.data) {
-            bodyHtml = Buffer.from(part.body.data, 'base64').toString('utf-8')
-          }
-          if (part.parts) part.parts.forEach(extractBody)
-        }
-        extractBody(msg.payload || {})
-
-        const priority = await classifyEmailPriority(subject, msg.snippet || '', from)
+        const { text: body, html: bodyHtml } = extractBody(msg.payload ?? {})
+        const priority = await classifyEmailPriority(subject, msg.snippet ?? '', from)
 
         return prisma.email.upsert({
           where: { gmailId: id },
           update: {},
           create: {
             gmailId: id,
-            threadId: msg.threadId,
+            threadId: msg.threadId ?? null,
             userId: user.id,
             from,
             to,
             subject,
-            snippet: msg.snippet || '',
-            body,
-            bodyHtml,
-            labels: msg.labelIds || [],
-            isRead: !msg.labelIds?.includes('UNREAD'),
+            snippet: msg.snippet ?? '',
+            body: body || null,
+            bodyHtml: bodyHtml || null,
+            labels: msg.labelIds ?? [],
+            isRead: !(msg.labelIds as string[])?.includes('UNREAD'),
             receivedAt,
             priority,
           },
         })
-      })
+      }),
     )
+
+    // Merge cached + fetched, preserving original order
+    const fetchedMap = new Map(fetchedEmails.map((e) => [e.gmailId, e]))
+    const emails = messageIds.map((id) => cachedMap.get(id) ?? fetchedMap.get(id)).filter(Boolean)
 
     return NextResponse.json({
       emails,
-      nextPageToken: corsairResult.nextPageToken || null,
-      resultSizeEstimate: corsairResult.resultSizeEstimate || emails.length,
+      nextPageToken: corsairResult.nextPageToken ?? null,
+      resultSizeEstimate: corsairResult.resultSizeEstimate ?? emails.length,
     })
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
     console.error('GET /api/emails error:', err)
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return NextResponse.json({ error: msg }, { status: 500 })
   }
 }

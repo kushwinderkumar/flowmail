@@ -9,11 +9,11 @@ export const dynamic = 'force-dynamic'
 
 export async function POST(req: NextRequest) {
   const session = await auth()
-  if (!session?.user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!session?.user?.email) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
-  const accessToken = (session as any).accessToken
-  const { message } = await req.json()
-
+  const { message } = (await req.json()) as { message?: string }
   if (!message?.trim()) {
     return NextResponse.json({ error: 'No message provided' }, { status: 400 })
   }
@@ -21,52 +21,64 @@ export async function POST(req: NextRequest) {
   const user = await getOrCreateUser(session)
   if (!user) return NextResponse.json({ error: 'User not found' }, { status: 401 })
 
-  const history = await prisma.chatMessage.findMany({
+  const accessToken = (session as any).accessToken as string | undefined
+
+  // Load recent history (oldest-first for the AI)
+  const historyRows = await prisma.chatMessage.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: 'desc' },
     take: 10,
+    select: { role: true, content: true },
   })
-  const formattedHistory = history
+  const history = historyRows
     .reverse()
     .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
 
+  // Persist user message before calling AI (so it's in history on retry)
   await prisma.chatMessage.create({
     data: { userId: user.id, role: 'user', content: message },
   })
 
-  const { text, actions } = await processAgentMessage(message, formattedHistory, {
-    userEmail: session.user.email || '',
+  const { text, actions } = await processAgentMessage(message, history, {
+    userEmail: session.user.email,
   })
 
-  const results: string[] = []
-  if (accessToken && actions) {
+  // Execute AI-decided actions
+  const actionResults: string[] = []
+  if (accessToken && actions.length > 0) {
     for (const action of actions) {
       try {
         if (action.type === 'send_email') {
-          await corsairSendEmail(accessToken, {
-            to: action.params.to,
-            subject: action.params.subject,
-            body: action.params.body,
-          })
-          results.push(`✅ Email sent to ${action.params.to}`)
+          const p = action.params as { to: string; subject: string; body: string }
+          await corsairSendEmail(accessToken, { to: p.to, subject: p.subject, body: p.body })
+          actionResults.push(`✅ Email sent to ${p.to}`)
         } else if (action.type === 'create_event') {
+          const p = action.params as {
+            title: string
+            startTime: string
+            endTime: string
+            attendees?: string[]
+            description?: string
+          }
           await corsairCreateEvent(accessToken, {
-            title: action.params.title,
-            startTime: action.params.startTime,
-            endTime: action.params.endTime,
-            attendees: action.params.attendees || [],
-            description: action.params.description,
+            title: p.title,
+            startTime: p.startTime,
+            endTime: p.endTime,
+            attendees: p.attendees ?? [],
+            description: p.description,
             addGoogleMeet: true,
           })
-          results.push(`✅ Calendar event created: "${action.params.title}"`)
+          actionResults.push(`✅ Event created: "${p.title}"`)
         }
-      } catch (err: any) {
-        results.push(`❌ Action failed: ${err.message}`)
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Unknown error'
+        actionResults.push(`❌ Action failed: ${msg}`)
       }
     }
   }
 
-  const finalText = results.length > 0 ? `${text}\n\n${results.join('\n')}` : text
+  const finalText =
+    actionResults.length > 0 ? `${text}\n\n${actionResults.join('\n')}` : text
 
   await prisma.chatMessage.create({
     data: { userId: user.id, role: 'assistant', content: finalText },
@@ -75,9 +87,11 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ text: finalText, actions })
 }
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   const session = await auth()
-  if (!session?.user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!session?.user?.email) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
   const user = await getOrCreateUser(session)
   if (!user) return NextResponse.json({ messages: [] })
@@ -86,6 +100,7 @@ export async function GET(req: NextRequest) {
     where: { userId: user.id },
     orderBy: { createdAt: 'asc' },
     take: 50,
+    select: { id: true, role: true, content: true, createdAt: true },
   })
 
   return NextResponse.json({ messages })

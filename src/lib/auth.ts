@@ -29,20 +29,19 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     maxAge: 30 * 24 * 60 * 60, // 30 days
   },
   callbacks: {
-    async jwt({ token, account, profile }) {
-      // Persist the OAuth access_token and refresh_token to the token right after sign in
+    async jwt({ token, account }) {
       if (account) {
+        // Persist OAuth tokens on first sign-in
         token.accessToken = account.access_token
         token.refreshToken = account.refresh_token
         token.expiresAt = account.expires_at
-        token.userId = token.sub
       }
       return token
     },
     async session({ session, token }) {
       if (session.user) {
-        // Expose userId and access token to the session
-        ;(session.user as any).id = token.sub || (token.userId as string)
+        // token.sub is the Google user ID (stable, set by NextAuth from the id_token)
+        ;(session.user as any).id = token.sub
         ;(session as any).accessToken = token.accessToken
         ;(session as any).refreshToken = token.refreshToken
       }

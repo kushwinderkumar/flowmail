@@ -2,30 +2,19 @@ import { PrismaClient } from '@prisma/client'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { Pool } from 'pg'
 
-// Prisma 7 requires driver adapter for pg
-// We lazy-init so build-time static analysis doesn't throw
+// Global singleton — prevents multiple PrismaClient instances in dev (HMR)
+const globalForPrisma = globalThis as unknown as { _prisma: PrismaClient | undefined }
 
-let _prisma: PrismaClient | undefined
-
-export function getPrisma(): PrismaClient {
-  if (_prisma) return _prisma
-
-  const connectionString = process.env.DATABASE_URL!
-  const pool = new Pool({ connectionString })
+function createClient(): PrismaClient {
+  const url = process.env.DATABASE_URL
+  if (!url) throw new Error('DATABASE_URL is not set')
+  const pool = new Pool({ connectionString: url })
   const adapter = new PrismaPg(pool)
-
-  _prisma = new PrismaClient({
+  return new PrismaClient({
     adapter,
     log: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
   })
-
-  return _prisma
 }
 
-// Keep `prisma` as a named export for easy use throughout the app
-// It's a proxy that lazily initialises the client
-export const prisma = new Proxy({} as PrismaClient, {
-  get(_target, prop) {
-    return (getPrisma() as any)[prop]
-  },
-})
+export const prisma: PrismaClient =
+  globalForPrisma._prisma ?? (globalForPrisma._prisma = createClient())

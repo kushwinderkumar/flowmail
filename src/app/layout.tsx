@@ -2,7 +2,6 @@ import type { Metadata } from 'next'
 import './globals.css'
 import { Toaster } from 'react-hot-toast'
 import SessionProvider from '@/components/providers/SessionProvider'
-import { auth } from '@/lib/auth'
 
 export const metadata: Metadata = {
   title: 'FlowMail — Superhuman-style Gmail & Calendar',
@@ -10,12 +9,13 @@ export const metadata: Metadata = {
     'A keyboard-first, AI-powered email and calendar workflow app built with Corsair, Gmail, and Google Calendar APIs.',
 }
 
-export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const session = await auth()
+// RootLayout does NOT fetch session — each auth-protected route handles that
+// individually. SessionProvider with no session prop uses client-side fetching.
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body>
-        <SessionProvider session={session}>
+        <SessionProvider>
           {children}
           <Toaster
             position="bottom-right"

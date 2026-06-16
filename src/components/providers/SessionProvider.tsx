@@ -2,14 +2,8 @@
 
 import { SessionProvider as NextAuthSessionProvider } from 'next-auth/react'
 
-export default function SessionProvider({
-  children,
-  session,
-}: {
-  children: React.ReactNode
-  session: any
-}) {
-  return (
-    <NextAuthSessionProvider session={session}>{children}</NextAuthSessionProvider>
-  )
+// No need to pass a server-side session — NextAuth handles client-side
+// session fetching automatically via /api/auth/session.
+export default function SessionProvider({ children }: { children: React.ReactNode }) {
+  return <NextAuthSessionProvider>{children}</NextAuthSessionProvider>
 }
