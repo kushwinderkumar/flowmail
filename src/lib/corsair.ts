@@ -1,12 +1,15 @@
-/**
- * Corsair API client
- * Corsair provides building blocks for Gmail and Google Calendar integrations,
- * real-time webhooks, and MCP-powered agent access.
- */
+
+import Corsair from "corsair";
+import { gmail } from "@corsair-dev/gmail";
+import { googlecalendar } from "@corsair-dev/googlecalendar"
+const corsair = new Corsair({
+  plugins: [gmail(), GoogleCalendar()],
+});
 
 function getCorsairBase(): string {
   return process.env.CORSAIR_BASE_URL ?? 'https://api.corsair.dev'
 }
+
 
 function getCorsairKey(): string {
   const key = process.env.CORSAIR_API_KEY
